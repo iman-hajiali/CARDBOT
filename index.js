@@ -4,21 +4,18 @@ const fs = require('fs');
 const app = express();
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-});
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
 const token = process.env.BOT_TOKEN;
 const bot = new TelegramBot(token, { polling: true });
 
-// متغیر برای ذخیره پیام‌های ارسال شده جهت پاک کردن بعدی
-let lastSentMessages = [];
-// متغیر برای مدیریت مراحل آپدیت (State)
+// ذخیره شناسه پیام‌های ارسال شده برای هر گروه
+let lastSentMessages = {};
 const userStates = {};
 
 console.log('🤖 GAKART Bot is running...');
 
-// --- خواندن کارت‌ها از فایل ---
+// --- خواندن و ذخیره کارت‌ها ---
 const getCards = () => {
     try {
         const data = fs.readFileSync('cards.json');
@@ -28,63 +25,63 @@ const getCards = () => {
     }
 };
 
-// --- ذخیره کارت‌ها در فایل ---
 const saveCards = (cards) => {
     fs.writeFileSync('cards.json', JSON.stringify(cards, null, 2));
 };
 
-// --- تابع ارسال کارت‌ها (فرمت جدید) ---
-const sendCards = async (chatId) => {
-    const cards = getCards();
+// --- دستور /start ---
+bot.onText(/\/start/, (msg) => {
+    bot.sendMessage(msg.chat.id, "خوش آمدید به سیستم هوشمند 💳 مدیریت مالی GAMAS");
+});
 
-    // 1. پاک کردن پیام‌های قبلی اگر وجود دارد
-    if (lastSentMessages.length > 0) {
-        for (const msgId of lastSentMessages) {
+// --- دستور /cards ---
+bot.onText(/\/cards/, async (msg) => {
+    const chatId = msg.chat.id;
+
+    // 1. پاک کردن پیام دستوری که کاربر فرستاده (/cards)
+    try {
+        await bot.deleteMessage(chatId, msg.message_id);
+    } catch (e) {}
+
+    // 2. پاک کردن لیست کارت‌های قبلی
+    if (lastSentMessages[chatId]) {
+        for (const msgId of lastSentMessages[chatId]) {
             try {
                 await bot.deleteMessage(chatId, msgId);
-            } catch (e) { /* پیام قبلاً پاک شده یا پیدا نشد */ }
+            } catch (e) {}
         }
-        lastSentMessages = [];
     }
+    lastSentMessages[chatId] = [];
 
-    // 2. ارسال پیام‌های جدید
+    // 3. ارسال کارت‌های جدید
+    const cards = getCards();
     for (const card of cards) {
-        // فرمت درخواستی: Code Block با نام و شماره
         const message = `\`\`\`
 👤${card.name}
 
  ${card.number}
 \`\`\``;
-        
         try {
             const sentMsg = await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
-            lastSentMessages.push(sentMsg.message_id);
+            lastSentMessages[chatId].push(sentMsg.message_id);
         } catch (err) {
             console.log("Error sending card");
         }
     }
-};
-
-// --- دستور /cards ---
-bot.onText(/\/cards/, async (msg) => {
-    await sendCards(msg.chat.id);
 });
 
-// --- دستور /update (مخصوص ادمین) ---
+// --- دستور /update ---
 bot.onText(/\/update/, async (msg) => {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
 
-    // چک کردن ادمین بودن کاربر
     try {
         const chatMember = await bot.getChatMember(chatId, userId);
         if (chatMember.status !== 'creator' && chatMember.status !== 'administrator') {
             await bot.sendMessage(chatId, '⛔ فقط ادمین‌ها می‌توانند کارت‌ها را تغییر دهند.');
             return;
         }
-    } catch (e) {
-        return; // در چت خصوصی یا خطا
-    }
+    } catch (e) { return; }
 
     const cards = getCards();
     const options = {
@@ -99,7 +96,7 @@ bot.onText(/\/update/, async (msg) => {
     await bot.sendMessage(chatId, '👤 شخصی را که می‌خواهید کارتش را تغییر دهید انتخاب کنید:', options);
 });
 
-// --- مدیریت دکمه‌ها و مراحل آپدیت ---
+// --- مدیریت دکمه‌ها ---
 bot.on('callback_query', async (callbackQuery) => {
     const msg = callbackQuery.message;
     const data = callbackQuery.data;
@@ -120,16 +117,14 @@ bot.on('callback_query', async (callbackQuery) => {
     }
 });
 
-// --- دریافت شماره جدید از ادمین ---
+// --- دریافت شماره جدید ---
 bot.on('message', async (msg) => {
     const userId = msg.from.id;
     const state = userStates[userId];
 
-    // اگر کاربر در مرحله وارد کردن شماره است
     if (state && state.step === 'waiting_number') {
         const newNumber = msg.text.trim();
         
-        // اعتبارسنجی ساده (فقط عدد و تعداد ارقام)
         if (!/^\d{16}$/.test(newNumber)) {
             await bot.sendMessage(msg.chat.id, '⚠️ شماره کارت باید دقیقا ۱۶ رقم باشد. لطفا دوباره وارد کنید:');
             return;
@@ -144,7 +139,25 @@ bot.on('message', async (msg) => {
 
         await bot.sendMessage(msg.chat.id, `✅ کارت ${cardName} با موفقیت آپدیت شد.`);
         
-        // ارسال مجدد کارت‌ها با اطلاعات جدید
-        await sendCards(msg.chat.id);
+        // ارسال مجدد کارت‌ها
+        const chatId = msg.chat.id;
+        if (lastSentMessages[chatId]) {
+            for (const msgId of lastSentMessages[chatId]) {
+                try { await bot.deleteMessage(chatId, msgId); } catch (e) {}
+            }
+        }
+        lastSentMessages[chatId] = [];
+
+        for (const card of cards) {
+            const message = `\`\`\`
+👤${card.name}
+
+ ${card.number}
+\`\`\``;
+             try {
+                const sentMsg = await bot.sendMessage(chatId, message, { parse_mode: 'Markdown' });
+                lastSentMessages[chatId].push(sentMsg.message_id);
+            } catch (err) {}
+        }
     }
 });
